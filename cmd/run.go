@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"runtime"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
 
 	"github.com/go-flutter-desktop/hover/cmd/packaging"
@@ -24,6 +25,8 @@ var (
 	runInitialRoute      string
 	runOmitEmbedder      bool
 	runOmitFlutterBundle bool
+	runDocker            bool
+	runWatch             bool
 )
 
 func init() {
@@ -33,6 +36,8 @@ func init() {
 	runCmd.Flags().StringVarP(&runObservatoryPort, "observatory-port", "", "50300", "The observatory port used to connect hover to VM services (hot-reload/debug/..)")
 	runCmd.Flags().BoolVar(&runOmitFlutterBundle, "omit-flutter", false, "Don't (re)compile the current Flutter project, useful when only working with Golang code (plugin)")
 	runCmd.Flags().BoolVar(&runOmitEmbedder, "omit-embedder", false, "Don't (re)compile 'go-flutter' source code, useful when only working with Dart code")
+	runCmd.Flags().BoolVar(&runDocker, "docker", false, "Execute the go build in a docker container. The Flutter build is always run locally")
+	runCmd.Flags().BoolVar(&runWatch, "watch", false, "Watch for file changes to allow for hot-reload without having to press 'r' in the terminal")
 	rootCmd.AddCommand(runCmd)
 }
 
@@ -122,6 +127,7 @@ func runAndAttach(projectName string, targetOS string) {
 
 	// Non-blockingly echo command stderr to terminal
 	go io.Copy(os.Stderr, stderrApp)
+	go io.Copy(os.Stdout, stdoutApp)
 
 	log.Infof("Running %s in debug mode", projectName)
 	err = cmdApp.Start()
@@ -142,7 +148,9 @@ func runAndAttach(projectName string, targetOS string) {
 }
 
 func startHotReloadProcess(cmdFlutterAttach *exec.Cmd, buildTargetMainDart string, uri string) {
-	cmdFlutterAttach.Stdin = os.Stdin
+	if runWatch == false {
+		cmdFlutterAttach.Stdin = os.Stdin
+	}
 	cmdFlutterAttach.Stdout = os.Stdout
 	cmdFlutterAttach.Stderr = os.Stderr
 
@@ -152,8 +160,59 @@ func startHotReloadProcess(cmdFlutterAttach *exec.Cmd, buildTargetMainDart strin
 		"--device-id", "flutter-tester",
 		"--debug-uri", uri,
 	}
+
+	var in io.WriteCloser
+	if runWatch == true {
+		var err error
+		in, err = cmdFlutterAttach.StdinPipe()
+		if err != nil {
+			panic(err)
+		}
+	}
+
 	err := cmdFlutterAttach.Start()
 	if err != nil {
 		log.Warnf("The command 'flutter attach' failed: %v hot reload disabled", err)
+		return
+	}
+
+	if runWatch == false {
+		return
+	}
+
+	go io.Copy(in, os.Stdin)
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Errorf("Failed to create new fs watcher: %v", err)
+		return
+	}
+	defer watcher.Close()
+
+	err = watcher.Add("./lib")
+	if err != nil {
+		log.Errorf("Failed to watch the lib directory: %v", err)
+		return
+	}
+
+	for {
+		select {
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+
+			if event.Op&fsnotify.Write == fsnotify.Write {
+				_, err := in.Write([]byte("r"))
+				if err != nil {
+					log.Warnf("Failed to perform hot reload: %v", err)
+				}
+			}
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			log.Warnf("fswatch: %v", err)
+		}
 	}
 }
