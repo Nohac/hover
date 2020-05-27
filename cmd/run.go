@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
@@ -195,6 +196,8 @@ func startHotReloadProcess(cmdFlutterAttach *exec.Cmd, buildTargetMainDart strin
 		return
 	}
 
+	var lastReloadTime time.Time
+
 	for {
 		select {
 		case event, ok := <-watcher.Events:
@@ -203,10 +206,19 @@ func startHotReloadProcess(cmdFlutterAttach *exec.Cmd, buildTargetMainDart strin
 			}
 
 			if event.Op&fsnotify.Write == fsnotify.Write {
-				_, err := in.Write([]byte("r"))
+				if time.Since(lastReloadTime) < time.Second {
+					continue
+				}
+				lastReloadTime = time.Now()
+
+				written, err := in.Write([]byte("r"))
+				log.Warnf("Trying to reload:", written, len(watcher.Events))
+
 				if err != nil {
 					log.Warnf("Failed to perform hot reload: %v", err)
+					continue
 				}
+
 			}
 		case err, ok := <-watcher.Errors:
 			if !ok {
